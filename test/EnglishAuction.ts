@@ -3,7 +3,7 @@ import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import {
   AuctionStartEventObject,
-  EnglishAuction,
+  EnglishAuction, GoodShippedEventObject,
 } from '../typechain-types/EnglishAuction';
 import { Signer } from 'ethers';
 
@@ -50,7 +50,7 @@ describe('EnglishAuction', function () {
     const [owner, otherAccount, oneMoreOtherAccount]: Signer[] = await ethers.getSigners();
 
     const EnglishAuction = await ethers.getContractFactory('EnglishAuction');
-    const englishAuction = await EnglishAuction.deploy();
+    const englishAuction = await EnglishAuction.connect(owner).deploy();
 
     return { englishAuction, owner, otherAccount, oneMoreOtherAccount };
   }
@@ -66,7 +66,7 @@ describe('EnglishAuction', function () {
     it('Should set the right owner', async function () {
       const { englishAuction, owner } = await loadFixture(deployedContract);
 
-      expect(await englishAuction.owner()).to.equal(owner.getAddress());
+      expect(await englishAuction.owner()).to.equal(await owner.getAddress());
     });
 
   });
@@ -89,7 +89,7 @@ describe('EnglishAuction', function () {
       const auctionStartEvent = transaction.events?.find(({ event }) => event === 'AuctionStart');
       expect(auctionStartEvent).is.not.empty;
       const { lot, goodId, lotId } = auctionStartEvent!.args as unknown as AuctionStartEventObject;
-      expect(lot.seller).to.equal(owner.getAddress());
+      expect(lot.seller).to.equal(await owner.getAddress());
       expect(lot.priceStep).to.equal(randomPriceStep);
       expect(lot.startPrice).to.equal(randomStartPrice);
       expect(lotId).to.equal(1);
@@ -175,7 +175,12 @@ describe('EnglishAuction', function () {
     });
 
     it('Fails bid with small price step', async function () {
-      const { englishAuction, otherAccount, owner, oneMoreOtherAccount } = await loadFixture(deployedContract);
+      const {
+        englishAuction,
+        otherAccount,
+        owner,
+        oneMoreOtherAccount
+      } = await loadFixture(deployedContract);
 
       const { lot } = await createLot(englishAuction, owner);
       const { priceStep, startPrice } = lot;
@@ -186,7 +191,7 @@ describe('EnglishAuction', function () {
       value = value.add(priceStep).sub(1);
 
       await expect(
-        englishAuction.connect(oneMoreOtherAccount).makeBid(lot.lotId, { value  }).then(t => t.wait())
+        englishAuction.connect(oneMoreOtherAccount).makeBid(lot.lotId, { value }).then(t => t.wait())
       ).to.be.rejectedWith(/Bid must be more by priceStep from last bid/);
 
     });
@@ -210,6 +215,63 @@ describe('EnglishAuction', function () {
       const balanceAfterSecondBid = await otherAccount.getBalance();
 
       expect(balanceAfterSecondBid.sub(startPrice)).to.equal(balanceAfterBid);
+
+    });
+  });
+
+  describe('Closes actions', async function() {
+
+    it('Sends money to seller after claim', async function() {
+      const { englishAuction, otherAccount, owner, lot, oneMoreOtherAccount } = await loadFixture(contractWithLot);
+      const { startPrice, priceStep, endTime } = lot;
+      await englishAuction.connect(otherAccount).makeBid(lot.lotId, { value: startPrice }).then(t => t.wait());
+      await englishAuction.connect(oneMoreOtherAccount).makeBid(lot.lotId, { value: startPrice.add(priceStep) }).then(t => t.wait());
+
+      await expect(
+        englishAuction.connect(owner).claim(lot.lotId).then(t => t.wait())
+      ).to.be.rejectedWith(/Lot is still receiving bids/);
+
+      await time.increaseTo(endTime);
+
+      const ownerBalance = await owner.getBalance();
+      const { events, gasUsed, effectiveGasPrice} = await englishAuction.connect(owner).claim(lot.lotId).then(t => t.wait());
+
+      const goodShippedEvent = events?.find(e => e.event === 'GoodShipped');
+      expect(goodShippedEvent).is.not.empty;
+      const { from, to, goodId } = goodShippedEvent!.args as unknown as GoodShippedEventObject;
+      expect(from).to.equal(await owner.getAddress());
+      expect(to).to.equal(await oneMoreOtherAccount.getAddress());
+      expect(goodId).to.equal(lot.goodId);
+
+      const claimGasSpend = gasUsed.mul(effectiveGasPrice);
+      const balanceAfterClaim = await owner.getBalance();
+
+      expect(balanceAfterClaim).to.equal(ownerBalance.add(startPrice.add(priceStep)).sub(claimGasSpend));
+
+      expect(await englishAuction.provider.getBalance(englishAuction.address)).to.equal(0);
+
+    });
+
+    it('Cancels auction by seller', async function() {
+      const { englishAuction, owner, otherAccount, lot } = await loadFixture(contractWithLot);
+      const { startPrice } = lot;
+      await expect(
+        englishAuction.connect(otherAccount).cancel(lot.lotId).then(t => t.wait())
+      ).to.be.rejectedWith(/Only owner can close lot/);
+
+      await englishAuction.connect(otherAccount).makeBid(lot.lotId, { value: startPrice }).then(t => t.wait());
+
+      const otherAccountBalance = await otherAccount.getBalance();
+      const { events } = await englishAuction.connect(owner).cancel(lot.lotId).then(t => t.wait());
+      const goodShippedEvent = events?.find(e => e.event === 'GoodShipped');
+      expect(goodShippedEvent).is.not.empty;
+      const { from, to, goodId } = goodShippedEvent!.args as unknown as GoodShippedEventObject;
+      expect(from).to.equal(await owner.getAddress());
+      expect(to).to.equal(await owner.getAddress());
+      expect(goodId).to.equal(lot.goodId);
+      const otherAccountBalanceAfterCancel = await otherAccount.getBalance();
+
+      expect(otherAccountBalanceAfterCancel).to.equal(otherAccountBalance.add(startPrice));
 
     });
 

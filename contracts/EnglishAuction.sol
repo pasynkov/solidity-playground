@@ -62,7 +62,14 @@ contract EnglishAuction {
         address payable indexed seller,
         uint256 indexed lotId,
         uint256 indexed goodId,
+        uint256 amount,
         Lot lot
+    );
+
+    event GoodShipped(
+        address payable indexed from,
+        address payable indexed to,
+        uint256 indexed goodId
     );
 
     error CannotBid(string info);
@@ -157,7 +164,48 @@ contract EnglishAuction {
             revert CannotCloseLot('Lot is still receiving bids');
         }
 
-        emit AuctionCompleted(payable(lot.seller), lotId, lot.goodId, lot);
+        Bid memory lastBid;
+
+        if (bids[lotId].length > 0) {
+            lastBid = bids[lotId][bids[lotId].length - 1];
+            payable(lot.seller).transfer(lastBid.amount);
+        }
+
+        sendGood(lot.goodId, payable(lot.seller), lastBid.amount > 0 ? payable(lastBid.bidder) : payable(lot.seller));
+
+        emit AuctionCompleted(payable(lot.seller), lotId, lot.goodId, lastBid.amount, lot);
+        return true;
+    }
+
+    function cancel(
+        uint256 lotId
+    ) public
+    lotIsActive(lotId)
+    returns(bool) {
+        Lot memory lot = lots[lotId];
+        if (lot.seller != msg.sender) {
+            revert CannotCloseLot('Only owner can close lot');
+        }
+
+        Bid memory lastBid;
+
+        if (bids[lotId].length > 0) {
+            lastBid = bids[lotId][bids[lotId].length - 1];
+            payable(lastBid.bidder).transfer(lastBid.amount);
+        }
+
+        sendGood(lot.goodId, payable(lot.seller), payable(lot.seller));
+
+        emit AuctionCompleted(payable(lot.seller), lotId, lot.goodId, 0, lot);
+        return true;
+    }
+
+    function sendGood(
+        uint256 goodId,
+        address payable from,
+        address payable to
+    ) private returns(bool) {
+        emit GoodShipped(payable(from), payable(to), goodId);
         return true;
     }
 
